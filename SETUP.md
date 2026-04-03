@@ -275,7 +275,7 @@ Useful for integration with external tools and AI assistants.
 uv tool install gosh-memory --force --from git+https://github.com/gosh-dot-ai/gosh.memory
 ```
 
-For encryption is available by setting `GOSH_MEMORY_ENCRYPTION_KEY` (hex), which enables AES for SQLCipher-backed SQLite for `.sqlite3` files when the `pysqlcipher3` extra and system SQLCipher libraries are installed:
+Optional encryption is available via `GOSH_MEMORY_ENCRYPTION_KEY` (hex), which enables AES for SQLCipher-backed SQLite `.sqlite3` files when the `pysqlcipher3` extra and system SQLCipher libraries are installed:
 ```bash
 sudo apt install libsqlcipher-dev
 uv tool install 'gosh-memory[sqlcipher]' --force --from git+https://github.com/gosh-dot-ai/gosh.memory
@@ -347,7 +347,7 @@ MCP tool calls require a session (initialize → tool call). Use `gosh.cli` or a
 
 ## Mode 3: Connect to Claude Code / Claude Desktop
 
-Start memory server follow [Mode 2](#mode-2-standalone--mcp-server-directly) to get the server running.
+Start the memory server per [Mode 2](#mode-2-standalone--mcp-server-directly).
 
 ### Get the token
 
@@ -408,7 +408,7 @@ Claude should call the tool and return memory statistics.
 
 OpenAI supports MCP servers as tool providers in the Agents API.
 
-Start memory server follow [Mode 2](#mode-2-standalone--mcp-server-directly) to get the server running and must be accessible from OpenAI's infrastructure (public URL or tunnel).
+Start the memory server per [Mode 2](#mode-2-standalone--mcp-server-directly). It must be accessible from OpenAI's infrastructure via a public URL or tunnel.
 
 ### Configure in OpenAI
 
@@ -443,7 +443,7 @@ response = client.responses.create(
 
 Anthropic's API supports MCP tool servers directly.
 
-Start memory server follow [Mode 2](#mode-2-standalone--mcp-server-directly) to get the server running.
+Start the memory server per [Mode 2](#mode-2-standalone--mcp-server-directly).
 
 ### Configure in Anthropic SDK
 
@@ -477,7 +477,7 @@ response = client.messages.create(
 
 ## Mode 6: Connect to Google Gemini
 
-Start memory server follow [Mode 2](#mode-2-standalone--mcp-server-directly) to get the server running.
+Start the memory server per [Mode 2](#mode-2-standalone--mcp-server-directly).
 
 ### Configure in Google AI SDK
 
