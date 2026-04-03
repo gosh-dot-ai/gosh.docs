@@ -5,14 +5,16 @@ How to install and run GOSH Memory in different configurations.
 ## Prerequisites
 
 All modes require:
-- Python 3.10+
 - Git
+
+For `gosh-memory`:
+- Python 3.10+
 - uv https://docs.astral.sh/uv/
 
 For building `gosh` and `gosh-agent`:
 - Rust 1.86+
 
-## Mode: Harness — full stack via gosh.cli
+## Mode 1: Harness — full stack via gosh.cli
 
 The recommended production setup. gosh.cli orchestrates memory and agent services,
 manages secrets, and provides a unified CLI.
