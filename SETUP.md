@@ -2,74 +2,48 @@
 
 How to install and run GOSH Memory in different configurations.
 
----
-
 ## Prerequisites
 
 All modes require:
-- Python 3.10+
 - Git
 
-For gosh.cli orchestration:
-- Rust 1.86+ (for building gosh.cli and gosh.agent)
+For `gosh-memory`:
+- Python 3.10+
+- uv https://docs.astral.sh/uv/
 
----
+For building `gosh` and `gosh-agent`:
+- Rust 1.86+
 
 ## Mode 1: Harness — full stack via gosh.cli
 
 The recommended production setup. gosh.cli orchestrates memory and agent services,
 manages secrets, and provides a unified CLI.
 
-### 1.1 Clone repos
+### Installation tools
 
 ```bash
-mkdir gosh && cd gosh
-git clone https://github.com/Futurizt/gosh.cli.git
-git clone https://github.com/Futurizt/gosh.memory.git
-git clone https://github.com/Futurizt/gosh.agent.git
+cargo install --git https://github.com/gosh-dot-ai/gosh.cli
+cargo install --git https://github.com/gosh-dot-ai/gosh.agent
+uv tool install gosh-memory --force --from git+https://github.com/gosh-dot-ai/gosh.memory
 ```
 
-All three must be sibling directories.
+### Initialize
 
-### 1.2 Build CLI
+Creates services.toml from a template:
 
 ```bash
-cd gosh.cli
-cargo build --release
-export PATH="$PWD/target/release:$PATH"
+mkdir my-gosh
+cd my-gosh
+gosh init
 ```
 
-### 1.3 Build Agent
+Then verify paths and ports:
 
 ```bash
-cd ../gosh.agent
-cargo build --release
+gosh doctor
 ```
 
-The agent binary will be at `gosh.agent/target/release/gosh-agent`.
-Set the path in `services.toml` after initialization (step 1.4).
-
-### 1.4 Initialize
-
-```bash
-cd ../gosh.cli
-gosh init          # creates services.toml from template
-```
-
-### 1.5 Configure paths
-
-Edit `services.toml` and set absolute paths:
-
-- `services.memory.path` — path to `gosh.memory` directory
-- `services.alpha.binary` — path to agent binary (e.g. `/absolute/path/to/gosh.agent/target/release/gosh-agent`)
-
-Then verify:
-
-```bash
-gosh doctor        # verify paths and ports
-```
-
-### 1.6 Set secrets
+### Set secrets
 
 ```bash
 gosh secret set ANTHROPIC_API_KEY sk-ant-...
@@ -81,14 +55,14 @@ gosh secret set GOOGLE_API_KEY ...
 
 Or export as environment variables — CLI falls back to env when a key is not in secrets.json.
 
-### 1.7 Start services
+### Start services
 
 ```bash
 gosh start         # starts memory first, then agent (dependency order)
 gosh status        # verify both running
 ```
 
-### 1.8 Configure memory models
+### Configure memory models
 
 Models must be configured explicitly. There are no implicit defaults for production.
 
@@ -145,7 +119,7 @@ gosh memory config get --key my-namespace \
   --agent-id alpha --swarm-id swarm_alpha --json   # verify
 ```
 
-### 1.9 Extraction / inference / judge models
+### Extraction / inference / judge models
 
 These are set via CLI args or services.toml:
 
@@ -163,7 +137,7 @@ Or via environment variables:
 - `GOSH_JUDGE_MODEL`
 - `GOSH_EMBED_MODEL`
 
-### 1.10 Agent config
+### Agent config
 
 Agent config is stored in memory as a `kind: agent_config` fact. The agent loads it at runtime -- there is no static TOML config for the agent itself.
 
@@ -187,14 +161,14 @@ The agent ships with 6 builtin profiles:
 
 Each call tracks cost against the SHELL budget using the profile's `cost_per_1k` rate.
 
-### 1.11 Important: no implicit defaults
+### Important: no implicit defaults
 
 - Memory extraction/inference models: must be set explicitly
 - Agent profiles: must reference models defined in memory config
 - API keys: must be provided via secrets or env vars
 - Embedding model: defaults to `text-embedding-3-large` but should be set explicitly for production
 
-### 1.12 First store and recall
+### First store and recall
 
 ```bash
 # Store content (triggers extraction)
@@ -218,7 +192,7 @@ gosh memory ask --key my-namespace \
   "What does Alice do?"
 ```
 
-### 1.13 With agent
+### With agent
 
 ```bash
 # Create task
@@ -276,7 +250,7 @@ TASK_ID=$(gosh agent alpha task create \
 gosh agent alpha task status $TASK_ID --key my-namespace --swarm-id swarm_alpha --json
 ```
 
-### 1.14 Without agent (memory only)
+### Without an agent (memory only)
 
 Edit `services.toml` to remove or comment out the `[services.agent]` section.
 `gosh start` will only start memory.
@@ -284,42 +258,33 @@ Edit `services.toml` to remove or comment out the `[services.agent]` section.
 All memory commands (`store`, `recall`, `ask`, `list`, `stats`, `config`) work
 without an agent.
 
-### 1.15 Stop
+### Stop
 
 ```bash
 gosh stop          # stops agent first, then memory
 ```
 
----
-
 ## Mode 2: Standalone — MCP server directly
 
-Run gosh.memory as a standalone MCP server without gosh.cli or gosh.agent.
+Run `gosh-memory` as a standalone MCP server without gosh.cli or gosh.agent.
 Useful for integration with external tools and AI assistants.
 
-### 2.1 Install
+### Install
 
 ```bash
-git clone https://github.com/Futurizt/gosh.memory.git
-cd gosh.memory
-python3 -m venv .venv
-.venv/bin/pip install -e . -r requirements.txt
+uv tool install gosh-memory --force --from git+https://github.com/gosh-dot-ai/gosh.memory
 ```
 
-For local embeddings (no OpenAI dependency):
+Optional encryption is available via `GOSH_MEMORY_ENCRYPTION_KEY` (hex), which enables AES for SQLCipher-backed SQLite `.sqlite3` files when the `pysqlcipher3` extra and system SQLCipher libraries are installed:
 ```bash
-.venv/bin/pip install -e ".[local-embed]"
+sudo apt install libsqlcipher-dev
+uv tool install 'gosh-memory[sqlcipher]' --force --from git+https://github.com/gosh-dot-ai/gosh.memory
 ```
 
-For TLS support:
-```bash
-.venv/bin/pip install cryptography
-```
-
-### 2.2 Configure provider
+### Configure provider
 
 ```bash
-.venv/bin/python -m src.cli setup --provider anthropic --api-key sk-ant-...
+gosh-memory setup --provider anthropic --api-key sk-ant-...
 ```
 
 Or set environment variables:
@@ -331,10 +296,10 @@ export GROQ_API_KEY=gsk_...
 export OPENAI_API_KEY=sk-...
 ```
 
-### 2.3 Start server
+### Start server
 
 ```bash
-.venv/bin/python -m src.mcp_server \
+gosh-memory start \
   --host 127.0.0.1 \
   --port 8765 \
   --data-dir ./data \
@@ -354,10 +319,10 @@ gosh.memory MCP Server
 
 Note the token — you need it for client connections.
 
-### 2.4 With TLS (for remote access)
+### With TLS (for remote access)
 
 ```bash
-.venv/bin/python -m src.mcp_server \
+gosh-memory start \
   --host 0.0.0.0 \
   --port 8765 \
   --tls \
@@ -371,7 +336,7 @@ Server prints a join token for remote agents:
 gosh-agent --join <join-token>...
 ```
 
-### 2.5 Verify
+### Verify
 
 ```bash
 # Health check (no auth needed)
@@ -380,21 +345,17 @@ curl http://localhost:8765/health
 
 MCP tool calls require a session (initialize → tool call). Use `gosh.cli` or an MCP client library instead of raw curl.
 
----
-
 ## Mode 3: Connect to Claude Code / Claude Desktop
 
-### 3.1 Start memory server (Mode 2)
+Start the memory server per [Mode 2](#mode-2-standalone--mcp-server-directly).
 
-Follow Mode 2 steps 2.1-2.3 to get the server running.
-
-### 3.2 Get the token
+### Get the token
 
 ```bash
 cat ~/.gosh-memory/token
 ```
 
-### 3.3 Add to Claude Code
+### Add to Claude Code
 
 **Option A: CLI**
 ```bash
@@ -421,13 +382,13 @@ claude mcp add gosh-memory \
 **Option C: User config (`~/.claude.json`)**
 Same format as Option B, applies to all projects.
 
-### 3.4 Verify in Claude Code
+### Verify in Claude Code
 
 Ask Claude: "Use the memory_stats tool with key 'test'"
 
 Claude should call the tool and return memory statistics.
 
-### 3.5 With TLS (remote server)
+### With TLS (remote server)
 
 ```json
 {
@@ -443,17 +404,13 @@ Claude should call the tool and return memory statistics.
 }
 ```
 
----
-
 ## Mode 4: Connect to OpenAI Agents / Responses API
 
 OpenAI supports MCP servers as tool providers in the Agents API.
 
-### 4.1 Start memory server (Mode 2)
+Start the memory server per [Mode 2](#mode-2-standalone--mcp-server-directly). It must be accessible from OpenAI's infrastructure via a public URL or tunnel.
 
-The server must be accessible from OpenAI's infrastructure (public URL or tunnel).
-
-### 4.2 Configure in OpenAI
+### Configure in OpenAI
 
 ```python
 from openai import OpenAI
@@ -475,22 +432,20 @@ response = client.responses.create(
 )
 ```
 
-### 4.3 Notes
+### Notes
 
 - Server must be publicly accessible (HTTPS required by OpenAI)
 - Use `--tls` and `--advertise-host` when starting the server
 - OpenAI will discover available tools via MCP protocol negotiation
 - All memory tools (store, recall, ask, list, stats, config) are available
 
----
-
 ## Mode 5: Connect to Anthropic API (tool use)
 
 Anthropic's API supports MCP tool servers directly.
 
-### 5.1 Start memory server (Mode 2)
+Start the memory server per [Mode 2](#mode-2-standalone--mcp-server-directly).
 
-### 5.2 Configure in Anthropic SDK
+### Configure in Anthropic SDK
 
 ```python
 import anthropic
@@ -513,20 +468,18 @@ response = client.messages.create(
 )
 ```
 
-### 5.3 Notes
+### Notes
 
 - Same requirements as OpenAI: public HTTPS endpoint
 - The Anthropic MCP connector uses `mcp_servers` to declare servers, with optional per-server `tool_configuration`
 - The connector API is evolving — check [Anthropic MCP connector docs](https://docs.anthropic.com/en/docs/agents-and-tools/mcp-connector) for the latest format
 - All memory tools available via MCP protocol negotiation
 
----
-
 ## Mode 6: Connect to Google Gemini
 
-### 6.1 Start memory server (Mode 2)
+Start the memory server per [Mode 2](#mode-2-standalone--mcp-server-directly).
 
-### 6.2 Configure in Google AI SDK
+### Configure in Google AI SDK
 
 Google Gemini supports MCP servers through the SDK's tool integration.
 The API is evolving — check [Gemini function calling docs](https://ai.google.dev/gemini-api/docs/function-calling) for the current MCP integration format.
@@ -543,18 +496,15 @@ client = genai.Client()
 # (exact API depends on SDK version — see official docs)
 ```
 
-### 6.3 Notes
+### Notes
 
 - Requires public HTTPS endpoint
 - Gemini MCP integration API is evolving — check official docs for the latest SDK format
 - All memory tools available via MCP protocol negotiation
 
----
-
 ## Mode 7: Connect to any MCP-compatible client
 
-gosh.memory speaks standard MCP over HTTP. Any client that supports
-MCP streamable HTTP transport can connect.
+`gosh-memory` speaks standard MCP over HTTP, any client that supports MCP streamable HTTP transport can connect.
 
 ### Connection details
 
@@ -587,8 +537,6 @@ After connection, the client discovers these tools via MCP initialization:
 | `memory_import` | Import from text/git/directory |
 | `memory_flush` | Rebuild tiers without re-embedding |
 | `memory_reextract` | Re-run extraction on raw sessions |
-
----
 
 ## First Steps After Setup (any mode)
 
@@ -628,8 +576,6 @@ memory_stats(key="demo")
 
 Returns: fact counts per tier, index status, session health, process costs.
 
----
-
 ## Troubleshooting
 
 ### "No granular facts" on recall
@@ -651,8 +597,6 @@ For self-signed certs, clients must either:
 - Use the join token (contains CA cert for pinning)
 - Accept invalid certs (development only)
 - Provide a proper CA-signed certificate via `--tls-certfile`
-
----
 
 ## Inspecting and Debugging
 
