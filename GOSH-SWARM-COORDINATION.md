@@ -9,7 +9,7 @@ For the identity / token / membership model the protocol relies on,
 see [PERMISSIONS-AND-ACL.md](PERMISSIONS-AND-ACL.md).
 
 Copyright 2026 (c) Mitja Goroshevsky and GOSH Technology Ltd.
-License: AGPL-3.0-only
+License: MIT
 
 ---
 

@@ -16,7 +16,7 @@ Related docs:
 - [GOSH-SWARM-COORDINATION.md](GOSH-SWARM-COORDINATION.md) — fact-based coordination protocol
 
 Copyright 2026 (c) Mitja Goroshevsky and GOSH Technology Ltd.
-License: AGPL-3.0-only
+License: MIT
 
 ---
 
