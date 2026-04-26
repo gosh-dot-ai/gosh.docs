@@ -3,9 +3,13 @@
 Fact-based coordination protocol for stateless multi-agent swarms.
 Agents communicate exclusively through gosh.memory — no direct connections.
 
+For the operator-side commands that bring this protocol up, see
+[SETUP.md](SETUP.md) and [GOSH-SWARM-USAGE-GUIDE.md](GOSH-SWARM-USAGE-GUIDE.md).
+For the identity / token / membership model the protocol relies on,
+see [PERMISSIONS-AND-ACL.md](PERMISSIONS-AND-ACL.md).
 
 Copyright 2026 (c) Mitja Goroshevsky and GOSH Technology Ltd.
-License: MIT
+License: AGPL-3.0-only
 
 ---
 
@@ -37,13 +41,24 @@ Every agent in a swarm has:
 
 This is the normative mode for v0.1 and the recommended mode for deterministic swarms.
 
-Operator assigns identity at launch time:
+Operator provisions and launches the agent with an explicit identity (via gosh.cli):
 
 ```bash
-gosh-agent --join <token> \
-  --watch-agent-id coder-a \
-  --watch-swarm-id swarm_alpha
+# admin host
+gosh agent create coder-a --memory <instance> --swarm swarm_alpha
+gosh agent bootstrap export --instance coder-a --file coder-a.bootstrap.json
+# move coder-a.bootstrap.json to the agent host
+
+# agent host
+gosh agent import coder-a.bootstrap.json
+gosh agent setup --instance coder-a
+gosh agent start --instance coder-a --watch \
+  --watch-key <KEY> --watch-swarm-id swarm_alpha
 ```
+
+Or, on a host that already has admin access, the operator can run
+`gosh-agent serve --bootstrap-file <PATH> --watch ...` directly with the
+same join-token contents.
 
 Use when: operator knows which machine should run which role (e.g. GPU machine for heavy inference, specific network for repo access).
 
@@ -52,8 +67,9 @@ The agent registers itself in memory on first activation:
 ```json
 {
   "kind": "agent_roster",
-  "scope": "project-shared",
+  "scope": "swarm-shared",
   "id": "roster_coder-a",
+  "target": ["swarm:swarm_alpha"],
   "body": {
     "agent_id": "coder-a",
     "agent_type": "coder",
@@ -66,28 +82,24 @@ The agent registers itself in memory on first activation:
 
 #### Mode B: Dynamic slot claim (self-registration)
 
-This mode is best-effort and experimental in v0.1. Use it only when the operator
-is not launching multiple competing unassigned agents of the same type against
-the same plan at the same time.
+This mode is documented as a future protocol direction. The current
+binary surface (`gosh-agent serve` / `gosh agent start`) requires an
+explicit `--watch-agent-id` (Mode A); there is no `--watch-agent-type`
+flag yet. Mode B is conceptually:
 
-Agent joins with only a type, claims an open slot from the plan:
-
-```bash
-gosh-agent --join <token> \
-  --watch-agent-type coder \
-  --watch-swarm-id swarm_alpha
-```
-
-On activation:
 1. `memory_query(filter={"kind": "plan"})` — read plan roles
 2. Find first unclaimed slot matching `agent_type`
-3. `store(kind=slot_claim)` — best-effort claim the slot
+3. `store(kind=slot_claim, scope=swarm-shared)` — best-effort claim
 4. Use the slot's `agent_id` for all subsequent operations
+
+Until binary support lands, an external orchestrator can implement this
+flow above the existing CLI by reserving a slot in memory and then
+running `gosh agent start --watch-agent-id <claimed-slot>`.
 
 ```json
 {
   "kind": "slot_claim",
-  "scope": "project-shared",
+  "scope": "swarm-shared",
   "id": "claim_coder-a_by_agent_xyz",
   "body": {
     "plan_id": "plan_feature_x",
@@ -113,12 +125,20 @@ All coordination happens through facts stored in gosh.memory. Each fact has a
 top-level `kind` and structured `body`. Actionable point-to-point facts also
 have `target_agent`. Broadcast facts such as `plan` and `agent_roster` omit it.
 
+> **Wire format note.** The protocol below uses `target_agent: "<id>"` for
+> readability. The canonical wire form persisted by `memory_store` and
+> consumed by courier and `gosh agent task create` is the top-level
+> array `target: ["agent:<id>"]`. Both produce equivalent routing —
+> match `target_agent` in this doc to `target=["agent:<value>"]` when
+> wiring it up. See §2 of [GOSH-SWARM-USAGE-GUIDE.md](GOSH-SWARM-USAGE-GUIDE.md)
+> for the canonical example.
+
 ### 3.1 `plan` — project definition (created by human)
 
 ```json
 {
   "kind": "plan",
-  "scope": "project-shared",
+  "scope": "swarm-shared",
   "id": "plan_feature_x",
   "body": {
     "title": "Feature X implementation",
@@ -159,7 +179,7 @@ have `target_agent`. Broadcast facts such as `plan` and `agent_roster` omit it.
 ```json
 {
   "kind": "task",
-  "scope": "project-shared",
+  "scope": "swarm-shared",
   "target_agent": "coder-a",
   "id": "task_phase_1",
   "body": {
@@ -182,7 +202,7 @@ have `target_agent`. Broadcast facts such as `plan` and `agent_roster` omit it.
 ```json
 {
   "kind": "task_result",
-  "scope": "project-shared",
+  "scope": "swarm-shared",
   "target_agent": "reviewer",
   "id": "result_task_phase_1_a1",
   "body": {
@@ -207,7 +227,7 @@ have `target_agent`. Broadcast facts such as `plan` and `agent_roster` omit it.
 ```json
 {
   "kind": "review_request",
-  "scope": "project-shared",
+  "scope": "swarm-shared",
   "target_agent": "reviewer",
   "id": "review_pr_42_a1",
   "body": {
@@ -236,7 +256,7 @@ On approve:
 ```json
 {
   "kind": "review_result",
-  "scope": "project-shared",
+  "scope": "swarm-shared",
   "target_agent": "coder-a",
   "id": "review_result_pr_42_a1_approve",
   "body": {
@@ -259,7 +279,7 @@ On request changes:
 ```json
 {
   "kind": "review_result",
-  "scope": "project-shared",
+  "scope": "swarm-shared",
   "target_agent": "coder-a",
   "id": "review_result_pr_42_a1_changes_1",
   "body": {
@@ -282,7 +302,7 @@ Reviewer also creates a fix task:
 ```json
 {
   "kind": "task",
-  "scope": "project-shared",
+  "scope": "swarm-shared",
   "target_agent": "coder-a",
   "id": "task_phase_1_fix_1",
   "body": {
@@ -305,7 +325,7 @@ Reviewer also creates a fix task:
 ```json
 {
   "kind": "agent_roster",
-  "scope": "project-shared",
+  "scope": "swarm-shared",
   "id": "roster_coder-a",
   "body": {
     "agent_id": "coder-a",
@@ -350,7 +370,7 @@ facts targeted at other agents.
 ### 4.2 Broadcast
 
 For facts that all agents should see (e.g. plan updates), omit `target_agent`
-and use `scope: project-shared`. Agents poll these via exact reads such as
+and use `scope: swarm-shared`. Agents poll these via exact reads such as
 `memory_query()` or `memory_get()`, not courier push and not semantic
 `recall()`.
 

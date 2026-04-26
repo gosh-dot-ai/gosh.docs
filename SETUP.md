@@ -1,727 +1,681 @@
 # Setup Guide
 
-How to install and run GOSH Memory in different configurations.
+How to install gosh and bring up memory + agents in different
+configurations. The canonical path uses `gosh.cli` to manage everything;
+the lower-level modes show what `gosh.cli` is doing under the hood.
 
-## Prerequisites
+---
 
-All modes require:
-- Git
+## Components and prerequisites
 
-For `gosh-memory`:
-- Python 3.10+
-- uv https://docs.astral.sh/uv/
+- `gosh.cli` (binary `gosh`) — orchestrator. Manages instances,
+  secrets, lifecycle, and forwards commands to memory and agents.
+- `gosh.memory` — Python service that ships as a Docker image (default)
+  or a local Python install. Speaks MCP over HTTP.
+- `gosh.agent` (binary `gosh-agent`) — Rust service. Speaks MCP over
+  HTTP, can also run as a stdio MCP proxy to inject auth into coding
+  CLIs.
 
-For building `gosh` and `gosh-agent`:
-- Rust 1.86+
+Prerequisites:
 
-## Mode 1: Harness — full stack via gosh.cli
+- macOS or Linux (x86_64 / aarch64). Windows is in design.
+- Docker (default memory runtime). Optional if you build memory from
+  source and run as a local binary.
+- Python 3.10+ (only if running memory from source).
+- Rust 1.86+ (only if building gosh.cli or gosh.agent from source).
+- An LLM provider key for memory's extraction and inference roles
+  (OpenAI, Anthropic, Groq, Google, or Inception).
+- For coding-CLI capture: at least one of Claude Code, Codex, or
+  Gemini installed locally with credentials.
 
-The recommended production setup. gosh.cli orchestrates memory and agent services,
-manages secrets, and provides a unified CLI.
+---
 
-### Installation tools
+## Mode 1: Quickstart with `gosh.cli` (recommended)
+
+This is the path the CLI's own quickstart and wizard prompt walk you
+through. About ten minutes from a fresh machine to a working agent.
+
+### 1.1 Install the CLI
 
 ```bash
-cargo install --git https://github.com/gosh-dot-ai/gosh.cli
-cargo install --git https://github.com/gosh-dot-ai/gosh.agent
-uv tool install gosh-memory --force --from git+https://github.com/gosh-dot-ai/gosh.memory
+curl -fsSL https://raw.githubusercontent.com/gosh-dot-ai/gosh.cli/main/install.sh | bash
 ```
 
-### Initialize
+The script downloads the latest `gosh` binary into `/usr/local/bin/`.
+For private mirrors / forks, see the gosh.cli README.
 
-Creates services.toml from a template:
+### 1.2 Pull memory and agent components
 
 ```bash
-mkdir my-gosh
-cd my-gosh
-gosh init
+gosh setup
 ```
 
-Then verify paths and ports:
+Idempotent: downloads the `gosh-agent` binary and loads the
+`gosh-memory` Docker image. Re-running skips components that are
+already at the requested version. Pin a version with
+`gosh setup --version vX.Y.Z`. Install only one component with
+`--component agent` or `--component memory`.
+
+### 1.3 Bring memory up
 
 ```bash
-gosh doctor
+gosh memory setup local --data-dir ~/gosh-data --runtime docker
+gosh memory start
+curl -fsS http://localhost:8765/health   # {"status":"ok"}
 ```
 
-### Set secrets
+`memory setup local` writes an instance config to
+`~/.gosh/memory/instances/local.toml` and stores the encryption key,
+bootstrap token, and server token in the OS keychain. `memory start`
+exports them as env vars to the memory process and bootstraps the first
+admin token on first run.
+
+For an external memory image, use `--runtime binary --binary <PATH>`
+instead of `--runtime docker`.
+
+For a non-bind public address (so remote agents can reach it), pass
+`--public-url https://memory.example.com:8765` to `memory setup local`.
+Local admin commands keep using the bind URL; agents are issued bootstrap
+files with the public URL.
+
+### 1.4 Bootstrap the namespace
+
+A namespace ("key") is the unit of isolation inside memory. Each key has
+its own facts, embeddings, and config. Most operators run a single key
+and put everything under it; multi-tenant deployments use one key per
+tenant.
 
 ```bash
-gosh secret set ANTHROPIC_API_KEY sk-ant-...
-gosh secret set GROQ_API_KEY gsk_...
-gosh secret set OPENAI_API_KEY sk-...
-# Optional:
-gosh secret set GOOGLE_API_KEY ...
+gosh memory init --key quickstart
 ```
 
-Or export as environment variables — CLI falls back to env when a key is not in secrets.json.
+This creates the `_instance_config` for the namespace with the current
+admin as owner. Prints the owner principal — note it for the swarm step.
 
-### Start services
+### 1.5 Store provider keys as memory secrets
+
+Keys live inside memory, encrypted at rest, and delivered to the agent
+at execution time inside an X25519-sealed envelope (X25519 +
+HKDF-SHA256 + AES-256-GCM, algorithm tag
+`x25519-hkdf-sha256-aes256gcm-v1`). They never sit in env vars on the
+agent host.
 
 ```bash
-gosh start         # starts memory first, then agent (dependency order)
-gosh status        # verify both running
+export OPENAI_API_KEY=sk-...
+gosh memory secret set-from-env OPENAI_API_KEY --name openai --key quickstart
+
+# or paste the value directly:
+gosh memory secret set anthropic sk-ant-... --key quickstart
 ```
 
-### Configure memory models
+`--scope` defaults to `system-wide`. Use `swarm-shared --swarm <ID>`
+for a swarm-scoped secret, `agent-private --agent-id <NAME>` for an
+agent-scoped one.
 
-Models must be configured explicitly. There are no implicit defaults for production.
+### 1.6 Configure extraction and inference profiles
+
+Memory needs to know which model to use for each role. There are no
+implicit defaults — operators set this explicitly.
 
 ```bash
-cat > config.json << 'EOF'
-{
+gosh memory config set --key quickstart '{
   "schema_version": 1,
   "embedding_model": "text-embedding-3-large",
+  "embedding_secret_ref": {"name": "openai", "scope": "system-wide"},
   "librarian_profile": "extraction",
-  "profiles": {
-    "1": "fast",
-    "2": "balanced",
-    "3": "strong",
-    "4": "max",
-    "5": "max"
-  },
+  "profiles": {"1": "fast", "2": "fast", "3": "balanced", "4": "balanced", "5": "strong"},
   "profile_configs": {
+    "extraction": {
+      "model": "anthropic/claude-sonnet-4-6",
+      "secret_ref": {"name": "anthropic", "scope": "system-wide"},
+      "pricing": {"input_per_1k": 0.003, "output_per_1k": 0.015}
+    },
     "fast": {
-      "model": "claude-haiku-4-5-20251001",
-      "context_window": 200000,
-      "max_output_tokens": 8192
+      "model": "anthropic/claude-haiku-4-5",
+      "secret_ref": {"name": "anthropic", "scope": "system-wide"},
+      "pricing": {"input_per_1k": 0.001, "output_per_1k": 0.005}
     },
     "balanced": {
-      "model": "claude-sonnet-4-6",
-      "context_window": 200000,
-      "max_output_tokens": 8192
+      "model": "anthropic/claude-sonnet-4-6",
+      "secret_ref": {"name": "anthropic", "scope": "system-wide"},
+      "pricing": {"input_per_1k": 0.003, "output_per_1k": 0.015}
     },
     "strong": {
-      "model": "claude-opus-4-6",
-      "context_window": 200000,
-      "max_output_tokens": 8192
-    },
-    "max": {
-      "model": "claude-opus-4-6",
-      "context_window": 200000,
-      "max_output_tokens": 8192
-    },
-    "extraction": {
-      "model": "claude-sonnet-4-6",
-      "context_window": 200000,
-      "max_output_tokens": 8192
+      "model": "anthropic/claude-opus-4-6",
+      "secret_ref": {"name": "anthropic", "scope": "system-wide"},
+      "pricing": {"input_per_1k": 0.015, "output_per_1k": 0.075}
     }
-  },
-  "retrieval": {
-    "default_token_budget": 4000,
-    "search_family": "auto"
   }
-}
-EOF
-
-gosh memory config set --file config.json --key my-namespace \
-  --agent-id alpha --swarm-id swarm_alpha
-gosh memory config get --key my-namespace \
-  --agent-id alpha --swarm-id swarm_alpha --json   # verify
+}'
 ```
 
-### Extraction / inference / judge models
+Provider routing is by the prefix on `model`:
 
-These are set via CLI args or services.toml:
+| Prefix | Provider |
+|--------|----------|
+| `anthropic/` | Anthropic API |
+| `qwen/`, `meta-llama/` | Groq API |
+| `google/` | Google Gemini API |
+| `inception/` | Inception Labs |
+| (bare name like `gpt-4o`) | OpenAI |
 
-```toml
-[services.memory]
-args = [
-    "--extraction-model", "claude-sonnet-4-6",
-    "--inference-model", "claude-sonnet-4-6",
-]
-```
+`secret_ref.name` is a label that points at a stored secret, not a
+routing key.
 
-Or via environment variables:
-- `GOSH_EXTRACTION_MODEL`
-- `GOSH_INFERENCE_MODEL`
-- `GOSH_JUDGE_MODEL`
-- `GOSH_EMBED_MODEL`
+`profiles` maps complexity-hint levels (1–5) to profile names. Profile
+names are arbitrary — `fast`, `balanced`, `strong` are conventional but
+you can name them anything as long as `profile_configs` defines them.
 
-### Agent config
+### 1.7 Create a swarm and provision yourself
 
-Agent config is stored in memory as a `kind: agent_config` fact. The agent loads it at runtime -- there is no static TOML config for the agent itself.
-
-Key fields:
-- `execution_mode`: `context_only` (agent makes LLM calls) or `memory_payload` (memory provides ready payload)
-- `fast_profile`, `balanced_profile`, `strong_profile`, `review_profile`, `extraction_profile`
-- `max_parallel_tasks`, `global_cooldown_secs`
-
-#### Builtin model profiles
-
-The agent ships with 6 builtin profiles:
-
-| Profile | Model | Backend |
-|---------|-------|---------|
-| `anthropic_haiku_api` | claude-haiku-4-5-20251001 | anthropic_api |
-| `anthropic_sonnet_api` | claude-sonnet-4-6 | anthropic_api |
-| `anthropic_opus_api` | claude-opus-4-6 | anthropic_api |
-| `claude_code_cli` | claude-code | claude_cli |
-| `codex_cli` | codex-cli | codex_cli |
-| `gemini_cli` | gemini-cli | gemini_cli |
-
-Each call tracks cost against the SHELL budget using the profile's `cost_per_1k` rate.
-
-### Important: no implicit defaults
-
-- Memory extraction/inference models: must be set explicitly
-- Agent profiles: must reference models defined in memory config
-- API keys: must be provided via secrets or env vars
-- Embedding model: defaults to `text-embedding-3-large` but should be set explicitly for production
-
-### First store and recall
+A swarm is the group through which agents share facts. Even a
+single-agent setup wants one, since `swarm-shared` is the default scope
+for things you want recallable from another session.
 
 ```bash
-# Store content (triggers extraction)
-gosh memory store --key my-namespace \
-  --agent-id alpha --swarm-id swarm_alpha \
-  --scope swarm-shared \
+# from the output of `gosh memory init` above
+OWNER_PRINCIPAL=service:<your-username>
+gosh memory auth swarm create quickstart-swarm --owner "$OWNER_PRINCIPAL"
+
+# provision the CLI as an agent identity so you can run data commands
+gosh memory auth provision-cli
+```
+
+`provision-cli` creates `agent:cli-<your-username>`, an internal swarm
+called `cli`, grants membership, and issues an agent token to the
+keychain. After this, `gosh memory data ...` works.
+
+### 1.8 First store and recall
+
+```bash
+gosh memory data store --key quickstart --scope swarm-shared --swarm quickstart-swarm \
   "Alice is a senior engineer at ACME Corp. She joined in 2024 and leads the platform team."
 
-# Build vector index
-gosh memory build-index --key my-namespace \
-  --agent-id alpha
+gosh memory data build-index --key quickstart
 
-# Recall
-gosh memory recall --key my-namespace \
-  --agent-id alpha --swarm-id swarm_alpha \
-  "Who is Alice?"
-
-# Ask (recall + inference)
-gosh memory ask --key my-namespace \
-  --agent-id alpha --swarm-id swarm_alpha \
-  "What does Alice do?"
+gosh memory data recall --key quickstart --swarm quickstart-swarm "Who is Alice?"
+gosh memory data ask    --key quickstart --swarm quickstart-swarm "What does Alice do?"
 ```
 
-### With agent
+`recall` returns retrieved facts and metadata, no LLM call. `ask` runs
+recall then inference and returns a prose answer.
+
+### 1.9 Create an agent
 
 ```bash
-# Create task
-TASK_ID=$(gosh agent alpha task create \
-  --extract memory \
-  --key my-namespace \
-  --swarm-id swarm_alpha \
+gosh agent create myagent --memory local --swarm quickstart-swarm
+```
+
+This:
+
+1. Calls `principal_create` to register `agent:myagent`
+2. Issues an `agent`-kind token for it
+3. Generates an X25519 keypair and registers the public key with memory
+4. Grants membership in `quickstart-swarm`
+5. Builds a join token (memory URL + transport token + principal token + cert pin)
+6. Saves principal token, join token, and X25519 secret key to the OS keychain
+7. Writes the agent config to `~/.gosh/agent/instances/myagent.toml`
+
+Pass `--binary <PATH>` to lock the agent to a specific `gosh-agent`
+binary; otherwise it resolves at start time from `cfg.binary` or `PATH`.
+
+### 1.10 Hook a coding CLI to the agent
+
+```bash
+gosh agent setup --instance myagent
+```
+
+By default this writes hooks and MCP registration **at project scope**:
+`<cwd>/.claude/settings.json`, `<cwd>/.codex/hooks.json`,
+`<cwd>/.gemini/settings.json`, and `<cwd>/.mcp.json` for the Claude
+project. These fire only when the coding CLI is launched from this
+directory.
+
+To enroll across all projects on the host (rare, leaks prompts across
+projects), pass `--scope user`. Codex MCP is always user-global because
+upstream codex has no per-project mode; only Codex hooks honor `--scope`.
+
+Filter by platform: `--platform claude` (repeatable) restricts setup to
+specific CLIs.
+
+Override the auto-detected memory key: `--key <KEY>`.
+
+Enable swarm-shared capture: `--swarm <SWARM>`.
+
+### 1.11 Start the agent (watch mode)
+
+```bash
+gosh agent start --instance myagent \
+  --watch --watch-key quickstart --watch-swarm-id quickstart-swarm \
+  --watch-budget 10
+```
+
+Watch mode subscribes to courier SSE for tasks targeted at this agent
+and falls back to polling every `--poll-interval` seconds (default 30).
+Each task gets up to `--watch-budget` SHELL (1 SHELL = $0.01 at the
+profile's max rate) to complete.
+
+CLI flags for `gosh agent start`:
+
+| Flag | Default | Purpose |
+|------|---------|---------|
+| `--watch` | off | Enable watch mode |
+| `--watch-key` | from saved cfg | Namespace to watch for tasks |
+| `--watch-context-key` | watch-key | Separate namespace for retrieval |
+| `--watch-agent-id` | derived from principal | Agent id to filter on |
+| `--watch-swarm-id` (alias `--watch-swarm`) | from saved cfg | Swarm id to subscribe under |
+| `--watch-budget` | 10.0 | SHELL budget per task |
+| `--poll-interval` | 30 | Seconds between fallback polls |
+| `--binary` | from saved cfg or `PATH` | Override `gosh-agent` path |
+
+CLI args override saved config; saved config is the fallback. Either
+must define `watch_key` and `watch_swarm_id` for watch to start.
+
+### 1.12 Verify
+
+```bash
+gosh status                 # all instances
+gosh memory status          # memory only
+gosh agent status --instance myagent
+gosh memory logs            # tail memory
+gosh agent logs --instance myagent
+```
+
+Logs land at `~/.gosh/run/{memory,agent}_<name>.log`. PIDs at
+`~/.gosh/run/{memory,agent}_<name>.pid`.
+
+### 1.13 Run a task end-to-end
+
+```bash
+TASK_ID=$(gosh agent task create --instance myagent \
+  --key quickstart --swarm-id quickstart-swarm \
+  --scope swarm-shared --budget 10 \
   "Summarize what we know about Alice")
 
-# Run task
-gosh agent alpha task run $TASK_ID --key my-namespace --swarm-id swarm_alpha --budget 10
-
-# Check status
-gosh agent alpha task status $TASK_ID --key my-namespace --swarm-id swarm_alpha --json
+gosh agent task run    --instance myagent $TASK_ID --key quickstart --swarm-id quickstart-swarm
+gosh agent task status --instance myagent $TASK_ID --key quickstart --swarm-id quickstart-swarm --json
+gosh agent task list   --instance myagent --key quickstart --swarm-id quickstart-swarm
 ```
 
-> **Important:** The agent's `--watch-key` must match the `--key` used when creating tasks.
-> Without `--watch-key`, the agent defaults to key `default` and won't see tasks in other namespaces.
->
-> Uncomment `--watch-key` in `services.toml` and set it to your namespace:
+`task create` writes an authoritative `kind=task` fact with
+`target=["agent:myagent"]`. The agent picks it up via courier (or poll
+fallback) and runs it through bootstrap → execution → review.
 
-```toml
-[services.alpha]
-type = "agent"
-binary = "/path/to/gosh-agent"
-port = 8767
-args = [
-    "--memory-url", "http://127.0.0.1:8765/mcp",
-    "--memory-token", "${MEMORY_SERVER_TOKEN}",
-    "--watch",
-    "--watch-key", "my-namespace",
-    "--watch-agent-id", "alpha",
-    "--watch-swarm-id", "swarm_alpha",
-]
-depends_on = ["memory"]
-health_endpoint = "/health"
+`task create` accepts:
 
-[services.alpha.envs]
-# configure ANTHROPIC_API_KEY in your local env
-```
+| Flag | Purpose |
+|------|---------|
+| `--key` | Memory namespace for the task |
+| `--scope` | Default `agent-private`; use `swarm-shared` for visible-to-swarm tasks |
+| `--swarm-id` (alias `--swarm`) | Swarm id |
+| `--context-key` | Distinct retrieval namespace if different from work key |
+| `--task-id` | External task id (otherwise auto-generated) |
+| `--workflow-id` | Workflow id for grouping |
+| `--metadata` | JSON object merged into task metadata |
+| `--route` | Routing hint surfaced to memory's plan inference |
+| `--target` | Override target principal(s) (repeatable) |
+| `--priority` | Integer priority (default 0) |
 
-> Then restart the agent:
+### 1.14 Stop
 
 ```bash
-gosh restart alpha
-
-# Create task
-TASK_ID=$(gosh agent alpha task create \
-  --extract memory \
-  --key my-namespace \
-  --swarm-id swarm_alpha \
-  "Summarize what we know about Alice")
-
-# Check status
-gosh agent alpha task status $TASK_ID --key my-namespace --swarm-id swarm_alpha --json
+gosh agent stop --instance myagent
+gosh memory stop
 ```
 
-### Without an agent (memory only)
+Order does not strictly matter — agent can outlive memory and just stop
+seeing tasks. Production deployments typically stop agents first.
 
-Edit `services.toml` to remove or comment out the `[services.agent]` section.
-`gosh start` will only start memory.
+---
 
-All memory commands (`store`, `recall`, `ask`, `list`, `stats`, `config`) work
-without an agent.
+## On-disk layout
 
-### Stop
-
-```bash
-gosh stop          # stops agent first, then memory
+```
+~/.gosh/
+├── memory/
+│   ├── instances/
+│   │   └── <name>.toml             # instance config (mode, runtime, url, paths)
+│   └── current                     # name of the default instance
+├── agent/
+│   ├── instances/
+│   │   └── <name>.toml             # instance config (memory, host, port, watch)
+│   └── current
+└── run/
+    ├── memory_<name>.pid
+    ├── memory_<name>.log
+    ├── memory_<name>.container     # docker runtime only
+    ├── agent_<name>.pid
+    ├── agent_<name>.log
+    └── agent_<name>_bootstrap.tmp  # temp bootstrap (deleted after start)
 ```
 
-## Mode 2: Standalone — MCP server directly
+OS keychain entries:
 
-Run `gosh-memory` as a standalone MCP server without gosh.cli or gosh.agent.
-Useful for integration with external tools and AI assistants.
-
-### Install
-
-```bash
-uv tool install gosh-memory --force --from git+https://github.com/gosh-dot-ai/gosh.memory
+```
+gosh / memory/<instance>   →  encryption_key, bootstrap_token, server_token,
+                              admin_token, agent_token  (JSON blob)
+gosh / agent/<name>        →  principal_token, join_token, secret_key  (JSON blob)
 ```
 
-Optional encryption is available via `GOSH_MEMORY_ENCRYPTION_KEY` (hex), which enables AES for SQLCipher-backed SQLite `.sqlite3` files when the `pysqlcipher3` extra and system SQLCipher libraries are installed:
+---
+
+## Mode 2: Direct MCP server (no `gosh.cli`)
+
+Run gosh.memory standalone for integration with Claude Code, Codex,
+Anthropic API, OpenAI Responses, Gemini, or any MCP-compatible client.
+Skip if you are using `gosh.cli` — it does this for you.
+
+### 2.1 Install from source
+
 ```bash
-sudo apt install libsqlcipher-dev
-uv tool install 'gosh-memory[sqlcipher]' --force --from git+https://github.com/gosh-dot-ai/gosh.memory
+git clone https://github.com/gosh-dot-ai/gosh.memory.git
+cd gosh.memory
+python3 -m venv .venv
+.venv/bin/pip install -e . -r requirements.txt
+
+# optional extras:
+.venv/bin/pip install -e ".[local-embed]"  # local embeddings, no OpenAI dep
+.venv/bin/pip install cryptography         # TLS support
 ```
 
-### Configure provider
+### 2.2 Configure provider (writes ~/.gosh-memory/config.json)
 
 ```bash
-gosh-memory setup --provider anthropic --api-key sk-ant-...
+.venv/bin/python -m src.cli setup --provider anthropic --api-key sk-ant-...
+# Providers: openai | groq | anthropic | google | inception
 ```
 
-Or set environment variables:
-```bash
-export ANTHROPIC_API_KEY=<your-api-key>
-# Or for Groq-hosted models:
-export GROQ_API_KEY=gsk_...
-# For embeddings (default --embed-model is text-embedding-3-large, which requires OpenAI):
-export OPENAI_API_KEY=sk-...
-```
+Or set env vars: `ANTHROPIC_API_KEY`, `GROQ_API_KEY`, `OPENAI_API_KEY`,
+`GOOGLE_API_KEY`. `GOSH_EXTRACTION_MODEL`, `GOSH_INFERENCE_MODEL`,
+`GOSH_JUDGE_MODEL`, `GOSH_EMBED_MODEL` override per-role models.
 
-### Start server
+### 2.3 Start the server
 
 ```bash
-gosh-memory start \
+.venv/bin/python -m src.cli start \
   --host 127.0.0.1 \
   --port 8765 \
   --data-dir ./data \
-  --extraction-model claude-sonnet-4-6 \
-  --inference-model claude-sonnet-4-6
+  --extraction-model anthropic/claude-sonnet-4-6 \
+  --inference-model anthropic/claude-sonnet-4-6
 ```
 
-Server prints:
+All flags:
+
+```
+--host ADDR              bind address (default 127.0.0.1)
+--port PORT              port (default 8765)
+--data-dir DIR           data directory (default ./data)
+--model MODEL            shortcut for all stages
+--extraction-model       override extraction
+--inference-model        override inference
+--judge-model            override judge (eval / MAL)
+--embed-model            override embeddings (default text-embedding-3-large)
+--server-token TOKEN     transport token; auto-generated if absent and
+                         saved to ~/.gosh-memory/token (mode 0600)
+--tls                    enable HTTPS, auto-generate self-signed cert
+--tls-certfile PATH      custom certificate (implies --tls)
+--tls-keyfile PATH       custom private key (implies --tls)
+--advertise-host ADDR    host to embed in join token (default --host)
+```
+
+Env-var equivalents and cross-cutting config:
+
+```
+GOSH_MEMORY_TOKEN              alternative to --server-token (transport)
+GOSH_MEMORY_ADMIN_TOKEN        bootstrap token (one-time admin pairing)
+GOSH_MEMORY_ENCRYPTION_KEY     32-byte hex; encrypts authority.db at rest
+```
+
+The server prints:
+
 ```
 gosh.memory MCP Server
   Listening: http://127.0.0.1:8765
   POST /mcp     — tool calls
   GET  /mcp/sse — Courier SSE
-  Token: <auto-generated>
+  Token: <auto-generated transport token>
   Saved to: ~/.gosh-memory/token
 ```
 
-Note the token — you need it for client connections.
+When `--tls` is enabled, it also prints a join token for remote agents:
 
-### With TLS (for remote access)
+```
+gosh-agent --join gosh_join_eyJ1cmwiOi...
+```
+
+### 2.4 Bootstrap the first admin
 
 ```bash
-gosh-memory start \
-  --host 0.0.0.0 \
-  --port 8765 \
-  --tls \
-  --advertise-host your-server.example.com \
-  --data-dir ./data \
-  --server-token YOUR_SECRET_TOKEN
+# Pre-set a bootstrap token (or memory generates one):
+export GOSH_MEMORY_ADMIN_TOKEN=$(openssl rand -hex 32)
+# Then call auth_bootstrap_admin once via MCP. With gosh.cli this
+# happens automatically on first `gosh memory start`.
 ```
 
-Server prints a join token for remote agents:
-```
-gosh-agent --join <join-token>...
-```
-
-### Verify
+### 2.5 Verify
 
 ```bash
-# Health check (no auth needed)
 curl http://localhost:8765/health
+# {"status": "ok"}
 ```
 
-MCP tool calls require a session (initialize → tool call). Use `gosh.cli` or an MCP client library instead of raw curl.
+MCP tool calls require an MCP session (`initialize` → tool call). Use
+gosh.cli or any MCP client library; raw curl is awkward for the MCP
+handshake.
 
-## Mode 3: Connect to Claude Code / Claude Desktop
+---
 
-Start the memory server per [Mode 2](#mode-2-standalone--mcp-server-directly).
+## Mode 3: Connect Claude Code (or any MCP client) directly
 
-### Get the token
+If you have memory running standalone and want a coding CLI to talk to
+it without `gosh-agent setup` doing the wiring:
 
-```bash
-cat ~/.gosh-memory/token
-```
-
-### Add to Claude Code
-
-**Option A: CLI**
-```bash
-claude mcp add gosh-memory \
-  --transport http \
-  http://localhost:8765/mcp
-```
-
-**Option B: Project config (`.mcp.json` in project root)**
-```json
+```jsonc
+// .mcp.json (project) or ~/.claude.json (user)
 {
   "mcpServers": {
     "gosh-memory": {
       "type": "http",
       "url": "http://localhost:8765/mcp",
       "headers": {
-        "x-server-token": "<token from ~/.gosh-memory/token>"
+        "x-server-token": "<contents of ~/.gosh-memory/token>",
+        "Authorization": "Bearer <agent-kind principal token>"
       }
     }
   }
 }
 ```
 
-**Option C: User config (`~/.claude.json`)**
-Same format as Option B, applies to all projects.
+Two layers of auth, both required for the data plane:
 
-### Verify in Claude Code
+- `x-server-token` — perimeter (server token). Sufficient only for `/health` and the MCP handshake.
+- `Authorization: Bearer <token>` — principal token. Required for all data-plane tools.
 
-Ask Claude: "Use the memory_stats tool with key 'test'"
+For TLS / remote memory, swap `http://` for `https://` and embed the
+issued join token's URL.
 
-Claude should call the tool and return memory statistics.
+For OpenAI Responses and Anthropic MCP connector, use the same URL +
+header pattern in their respective `tools[].headers` blocks. Public
+HTTPS is required for both; use `--tls --advertise-host
+your-host.example.com` when starting memory.
 
-### With TLS (remote server)
+---
 
-```json
-{
-  "mcpServers": {
-    "gosh-memory": {
-      "type": "http",
-      "url": "https://your-server:8765/mcp",
-      "headers": {
-        "x-server-token": "<token>"
-      }
-    }
-  }
-}
-```
+## Mode 4: Remote memory + local agent
 
-## Mode 4: Connect to OpenAI Agents / Responses API
+A common production shape: memory runs on a server, agents run on
+operator machines or build hosts.
 
-OpenAI supports MCP servers as tool providers in the Agents API.
-
-Start the memory server per [Mode 2](#mode-2-standalone--mcp-server-directly). It must be accessible from OpenAI's infrastructure via a public URL or tunnel.
-
-### Configure in OpenAI
-
-```python
-from openai import OpenAI
-
-client = OpenAI()
-
-response = client.responses.create(
-    model="gpt-4.1",
-    tools=[{
-        "type": "mcp",
-        "server_label": "gosh-memory",
-        "server_url": "https://your-server:8765/mcp",
-        "headers": {
-            "x-server-token": "<token>"
-        },
-        "require_approval": "never",
-    }],
-    input="Use memory_recall with key 'default' to search for 'Alice'"
-)
-```
-
-### Notes
-
-- Server must be publicly accessible (HTTPS required by OpenAI)
-- Use `--tls` and `--advertise-host` when starting the server
-- OpenAI will discover available tools via MCP protocol negotiation
-- All memory tools (store, recall, ask, list, stats, config) are available
-
-## Mode 5: Connect to Anthropic API (tool use)
-
-Anthropic's API supports MCP tool servers directly.
-
-Start the memory server per [Mode 2](#mode-2-standalone--mcp-server-directly).
-
-### Configure in Anthropic SDK
-
-```python
-import anthropic
-
-client = anthropic.Anthropic()
-
-response = client.messages.create(
-    model="claude-sonnet-4-6",
-    max_tokens=1024,
-    mcp_servers=[{
-        "type": "url",
-        "url": "https://your-server:8765/mcp",
-        "name": "gosh-memory",
-        "authorization_token": "<token>",
-    }],
-    messages=[{
-        "role": "user",
-        "content": "Use memory_recall to search for Alice in key 'default'"
-    }]
-)
-```
-
-### Notes
-
-- Same requirements as OpenAI: public HTTPS endpoint
-- The Anthropic MCP connector uses `mcp_servers` to declare servers, with optional per-server `tool_configuration`
-- The connector API is evolving — check [Anthropic MCP connector docs](https://docs.anthropic.com/en/docs/agents-and-tools/mcp-connector) for the latest format
-- All memory tools available via MCP protocol negotiation
-
-## Mode 6: Connect to Google Gemini
-
-Start the memory server per [Mode 2](#mode-2-standalone--mcp-server-directly).
-
-### Configure in Google AI SDK
-
-Google Gemini supports MCP servers through the SDK's tool integration.
-The API is evolving — check [Gemini function calling docs](https://ai.google.dev/gemini-api/docs/function-calling) for the current MCP integration format.
-
-The general pattern uses the SDK's MCP session/tool conversion:
-
-```python
-from google import genai
-from google.genai import types
-
-client = genai.Client()
-
-# Connect to MCP server and convert tools
-# (exact API depends on SDK version — see official docs)
-```
-
-### Notes
-
-- Requires public HTTPS endpoint
-- Gemini MCP integration API is evolving — check official docs for the latest SDK format
-- All memory tools available via MCP protocol negotiation
-
-## Mode 7: Connect to any MCP-compatible client
-
-`gosh-memory` speaks standard MCP over HTTP, any client that supports MCP streamable HTTP transport can connect.
-
-### Connection details
-
-| Setting | Value |
-|---------|-------|
-| Transport | HTTP (streamable) |
-| Endpoint | `http(s)://HOST:PORT/mcp` |
-| Auth header | `x-server-token: <token>` |
-| Health check | `GET /health` (no auth) |
-| SSE (Courier) | `GET /mcp/sse` |
-
-### Available MCP tools
-
-After connection, the client discovers these tools via MCP initialization:
-
-| Tool | Description |
-|------|-------------|
-| `memory_store` | Store content, triggers extraction |
-| `memory_recall` | Semantic search with complexity hints |
-| `memory_ask` | Recall + LLM inference |
-| `memory_list` | List facts with ACL filtering |
-| `memory_get` | Get single fact by ID |
-| `memory_stats` | Store health and telemetry |
-| `memory_build_index` | Build/rebuild vector index |
-| `memory_set_config` | Set canonical memory config |
-| `memory_get_config` | Get current memory config |
-| `memory_query` | Structured fact query with filters |
-| `memory_ingest_asserted_facts` | Ingest pre-extracted facts |
-| `memory_ingest_document` | Ingest a document |
-| `memory_import` | Import from text/git/directory |
-| `memory_flush` | Rebuild tiers without re-embedding |
-| `memory_reextract` | Re-run extraction on raw sessions |
-
-## First Steps After Setup (any mode)
-
-### Store your first data
-
-```
-memory_store(key="demo", content="Alice is a senior engineer at ACME Corp.", session_num=1, session_date="2026-03-29")
-```
-
-### Build the index
-
-```
-memory_build_index(key="demo")
-```
-
-This embeds all facts and builds retrieval indices. Required before recall.
-
-### Query
-
-```
-memory_recall(key="demo", query="Who is Alice?")
-```
-
-Returns: context with retrieved facts, complexity hint, query type classification.
-
-```
-memory_ask(key="demo", query="What does Alice do?")
-```
-
-Returns: LLM-generated answer based on retrieved facts.
-
-### Check health
-
-```
-memory_stats(key="demo")
-```
-
-Returns: fact counts per tier, index status, session health, process costs.
-
-## Troubleshooting
-
-### "No granular facts" on recall
-Index not built. Run `memory_build_index` after storing data.
-
-### "secret not found: ANTHROPIC_API_KEY"
-Set the key: `gosh secret set ANTHROPIC_API_KEY sk-ant-...` or export as env var.
-
-### Health check fails
-Check if server is running: `curl http://localhost:8765/health`
-Check logs: `gosh logs memory` (harness mode) or server stdout (standalone).
-
-### Token auth fails
-Get the correct token: `cat ~/.gosh-memory/token`
-Or set a known token at startup: `--server-token mytoken`
-
-### TLS certificate errors
-For self-signed certs, clients must either:
-- Use the join token (contains CA cert for pinning)
-- Accept invalid certs (development only)
-- Provide a proper CA-signed certificate via `--tls-certfile`
-
-## Inspecting and Debugging
-
-### Inspecting a retrieval
+### Server side
 
 ```bash
-# Full recall telemetry
-gosh memory recall --key my-namespace --json "What is Project Alpha?"
+gosh memory setup local --runtime docker --public-url https://memory.example.com:8765
+gosh memory start
+
+# export an admin bundle for the operator(s)
+gosh memory setup remote export --file admin-bundle.json
+# JSON with { url, admin_token, server_token, tls_ca, schema_version }
 ```
 
-Key fields to check:
-- `retrieved_count` > 0 (facts were found)
-- `query_type` -- was the query classified correctly?
-- `retrieval_families` -- which retrieval paths fired?
-- `search_family` -- conversation vs document routing
-- `recommended_prompt_type` -- what prompt style was selected?
-- `use_tool` -- should tools be used?
-- `complexity_hint.score` -- how complex is this query?
-- `recommended_profile` -- which model tier was recommended?
-- `payload_meta.truncated` -- was context truncated?
+> **TLS termination.** `gosh memory setup local` itself has no `--tls`
+> flag — terminate TLS at a reverse proxy (Caddy, nginx, Traefik) and
+> point `--public-url` at the proxy's HTTPS endpoint. The `--tls`
+> flags described in Mode 2 below apply only to the bare
+> `python -m src.cli start` invocation, where the Python server
+> generates a self-signed cert directly.
 
-### Inspecting routing and tool use
+### Operator side
 
 ```bash
-# Full ask telemetry
-gosh memory ask --key my-namespace --json "Summarize Project Alpha"
+gosh memory setup remote import --file admin-bundle.json --name prod
+gosh memory data stats --instance prod --key default   # verify
 ```
 
-Key fields to check:
-- `profile_used` vs `recommended_profile` -- did the system use the recommended model?
-- `profile_fallback` -- was a fallback needed?
-- `tool_called` -- did inference use tools?
-- `budget_exceeded` -- was the token budget hit?
-- `estimated_cost` -- what did this cost?
+### Provisioning a remote agent
 
-### Inspecting store validity
+On the memory server (admin context):
 
 ```bash
-# Memory stats
-gosh memory stats --key my-namespace
+gosh agent create remote-coder --memory prod --swarm quickstart-swarm
+gosh agent bootstrap export --instance remote-coder --file remote-coder.bootstrap.json
 ```
 
-Key fields to check:
-- `granular` > 0 -- facts extracted successfully?
-- `consolidated` > 0 -- per-session summaries built?
-- `cross_session` > 0 -- per-entity synthesis built?
-- `index_built` = true -- is the vector index ready?
-- `all_raw_sessions_active` = true -- any stuck sessions?
-- `raw_session_status_counts` -- breakdown of session states
-- `process_cost_summary` -- LLM costs (note: process-scoped, resets on restart)
+Move `remote-coder.bootstrap.json` to the agent host (it is mode 0600
+and contains the principal token + X25519 private key — treat it as a
+secret).
 
-### Inspecting an agent run
+On the agent host:
 
 ```bash
-# Agent task status with full telemetry
-gosh agent alpha task status task-abc123 --key my-namespace --json
+gosh agent import remote-coder.bootstrap.json
+gosh agent setup --instance remote-coder
+gosh agent start --instance remote-coder --watch --watch-key default --watch-swarm-id quickstart-swarm
 ```
 
-The `--json` flag returns structured telemetry (see [TELEMETRY-CONTRACT.md](TELEMETRY-CONTRACT.md) for schema). Without it, output is human-readable summary.
-
-Key fields to check:
-- `telemetry_version` -- schema version (currently 1)
-- `status` -- done, failed, pending?
-- `phase` -- bootstrap, execution, review
-- `iteration` -- how many execution iterations ran?
-- `started_at` / `finished_at` -- ISO 8601 timestamps for the task run
-- `shell_spent` > 0 -- did the agent actually run?
-- `profile_used` -- which model profile was used?
-- `backend_used` -- `anthropic_api`, `claude_cli`, `codex_cli`, or `gemini_cli`
-- `result_fact` -- is there a result?
-- `session_fact` -- execution trace
-
-### Inspecting harness artifacts
-
-Per-case `telemetry.json` contains:
+### Rotating credentials
 
 ```bash
-cat harness-output/case-001/telemetry.json | jq '.validity'
-# -> "valid" or "invalid" or "partial"
-
-cat harness-output/case-001/telemetry.json | jq '.recall.retrieved_count'
-# -> number of facts retrieved
-
-cat harness-output/case-001/telemetry.json | jq '.ask.profile_used'
-# -> which model was used
-
-cat harness-output/case-001/telemetry.json | jq '.judge'
-# -> judge verdict and reasoning
+gosh agent bootstrap rotate --instance <name>
 ```
 
-### Failure classification
+Reissues the principal token, regenerates the X25519 keypair, rebuilds
+the join token, writes them to the keychain. If the agent is currently
+running, it is stopped, the bootstrap-temp file is rewritten, and the
+agent is restarted with the same watch parameters.
 
-**Invalid run:**
-- `validity: "invalid"` in telemetry
-- Caused by: missing config, missing API keys, service not running
+---
 
-**Broken store:**
-- `gosh memory stats` shows `index_built: false` or `all_raw_sessions_active: false`
-- Fix: `gosh memory build-index`, check `raw_session_status_counts`
+## Agent profiles and the SHELL budget
 
-**Partial ingest:**
-- `granular` = 0 despite data being stored -- extraction may have failed
-- `consolidated` = 0 with `granular` > 0 -- consolidation not yet run
-- `cross_session` = 0 with `granular` > 0 -- cross-session synthesis not yet run
-- Fix missing tiers: `gosh memory build-index --key my-namespace` (rebuilds if dirty) or `gosh memory flush --key my-namespace` (forces consolidation + cross-session)
-- If extraction itself failed, check logs and re-run: `gosh memory reextract --key my-namespace`
+`gosh-agent` does not carry a hardcoded profile list. The model, secret
+reference, and pricing for each call are returned by memory's
+`memory_plan_inference` tool. The agent extracts:
 
-**Wrong family routing:**
-- `search_family` in recall telemetry doesn't match expected (conversation vs document)
-- Check `retrieval_families` for which paths fired
-- May need to adjust `retrieval.search_family` in memory config
+- `payload` — model id (e.g. `anthropic/claude-opus-4-6`)
+- `secret_ref` — pointer to the secret to decrypt for the API call
+- `payload_meta.local_cli` — when present, run a local coding CLI instead
 
-**Retrieval miss:**
-- `retrieved_count` = 0 or very low
-- Check `query_type` -- was the query misclassified?
-- Check `coverage_pct` -- is enough data in the index?
-- Check `selection_scores` for score distribution
+The SHELL budget (1 SHELL = $0.01 at the profile's max rate) is enforced
+per-task. Twenty percent is reserved for the review phase by default
+(`review_budget_reserve = 0.2` in the agent's `AgentConfig`).
 
-**Packet miss:**
-- `payload_meta.truncated` = true
-- Context was too large for the selected profile's context window
-- Increase `default_token_budget` or use a larger model
+Concurrency: each agent process tracks `in_flight_tasks` in memory and
+caps itself at `max_parallel_tasks` (default 4). There is **no** global
+600-second cooldown across CLIs in the current implementation; the
+memory side enforces single-flight on the data plane through
+`memory_write` semantics.
 
-**Answer/judge miss:**
-- `ask` telemetry shows answer but `judge.verdict` is negative
-- Check `profile_used` -- was the right model used?
-- Check `tool_called` -- were tools available when needed?
-- Check `budget_exceeded` -- did the model run out of tokens?
+---
+
+## What gosh.cli is doing behind the scenes
+
+If you need to integrate without `gosh.cli`, the dance is:
+
+1. Start memory; export `GOSH_MEMORY_ADMIN_TOKEN` and
+   `GOSH_MEMORY_ENCRYPTION_KEY`.
+2. Call `auth_bootstrap_admin` to mint the first admin token.
+3. Call `principal_create` for each agent identity.
+4. Call `auth_token_issue --kind agent` to get an agent token.
+5. Call `swarm_create` and `membership_grant` to set up groups.
+6. Call `memory_set_config` and `memory_store_secret` to wire models
+   and provider keys.
+7. Build a join token JSON for each agent and ship it to the agent host.
+8. On the agent host, run `gosh-agent serve --bootstrap-file <PATH>` (or
+   pass `--join <TOKEN>` with `--allow-insecure-inline-join`).
+
+See [PERMISSIONS-AND-ACL.md](PERMISSIONS-AND-ACL.md) for the principal /
+token model in detail and [MEMORY-SYSTEM.md](MEMORY-SYSTEM.md) for the
+fact and retrieval model.
+
+---
+
+## Inspecting and debugging
+
+### Recall telemetry
+
+```bash
+gosh memory data recall --key <KEY> --swarm <SWARM> --json "<query>"
+```
+
+Key fields (full list in [TELEMETRY-CONTRACT.md](TELEMETRY-CONTRACT.md)):
+
+- `retrieved_count` — facts found
+- `query_type` — detected type (lookup, temporal, counting, …)
+- `retrieval_families` — which retrieval paths fired
+- `search_family` — `conversation`, `document`, `codebase`, or `auto`
+- `complexity_hint.score` / `level` / `dominant`
+- `recommended_profile` — what memory recommends for this query
+- `payload_meta.budget_exceeded` — was context too large
+
+### Ask telemetry
+
+```bash
+gosh memory data ask --key <KEY> --swarm <SWARM> --json "<question>"
+```
+
+- `profile_used` vs `recommended_profile`
+- `profile_fallback` — was a fallback profile used
+- `tool_called` — was a tool invoked (`date_diff`, `count_items`,
+  `get_more_context`)
+- `budget_exceeded`, `estimated_cost`
+
+### Store health
+
+```bash
+gosh memory data stats --key <KEY>
+```
+
+- `granular`, `consolidated`, `cross_session` — fact tier counts
+- `index_built` — vector index ready?
+- `all_raw_sessions_active` — any stuck sessions?
+- `process_cost_summary` — LLM cost breakdown for the current process
+  (resets on memory restart; not per-key)
+
+### Agent task
+
+```bash
+gosh agent task status --instance <NAME> <TASK_ID> --key <KEY> --json
+```
+
+- `status`, `phase`, `iteration`
+- `shell_spent`, `profile_used`, `backend_used`
+- `session_fact`, `result_fact`, `deliverable_fact` — agent-side wrappers
+  around the persisted fact kinds `task_session`, `task_result`, and
+  `task_deliverable` respectively (full id + kind + fact + metadata)
+
+### Common failures
+
+| Symptom | Likely cause | Fix |
+|---------|--------------|-----|
+| "data commands ... require an agent token" | Keychain has no agent token | `gosh memory auth provision-cli` |
+| "scope must be provided explicitly" | Missing `--scope` on store/ingest | Pass `--scope agent-private\|swarm-shared\|system-wide` |
+| `index_built: false` after store | First store, index not built yet | `gosh memory data build-index --key <KEY>` |
+| `granular > 0` but `consolidated = 0` | Consolidation not yet run | `gosh memory data flush --key <KEY>` |
+| Watch mode does not see tasks | `watch-key` mismatch with task key | Verify `gosh agent status` shows the right `watch_key` |
+| `BOOTSTRAP_ALREADY_USED` | Bootstrap token consumed | Use the saved admin token (already in keychain) |
+| Health check fails | Memory not running or wrong port | `gosh memory status`; check `~/.gosh/run/memory_<name>.log` |
+
+For deeper inspection, the harness also produces a per-case
+`telemetry.json` matching the shape in
+[TELEMETRY-CONTRACT.md](TELEMETRY-CONTRACT.md).
