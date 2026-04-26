@@ -1,29 +1,39 @@
 # GOSH Swarm Usage Guide
 
-Practical guide for running multi-agent swarms with the current `gosh.memory` +
-`gosh.agent` + `gosh.cli` stack.
+Practical guide for running multi-agent swarms with the current
+`gosh.memory` + `gosh.agent` + `gosh.cli` stack.
 
-For installation and configuration, see [SETUP.md](./SETUP.md).
-For how memory retrieval and extraction work, see [MEMORY-SYSTEM.md](./MEMORY-SYSTEM.md).
+For installation and configuration, see [SETUP.md](SETUP.md).
+For how memory retrieval and extraction work, see
+[MEMORY-SYSTEM.md](MEMORY-SYSTEM.md).
+For identity, tokens, and visibility, see
+[PERMISSIONS-AND-ACL.md](PERMISSIONS-AND-ACL.md).
 
 Related docs:
-- [ARCHITECTURE.md](./ARCHITECTURE.md) -- production architecture overview
-- [TELEMETRY-CONTRACT.md](./TELEMETRY-CONTRACT.md) -- telemetry field reference
-- [GOSH-SWARM-COORDINATION.md](./GOSH-SWARM-COORDINATION.md) -- coordination protocol
+
+- [ARCHITECTURE.md](ARCHITECTURE.md) — production architecture overview
+- [TELEMETRY-CONTRACT.md](TELEMETRY-CONTRACT.md) — telemetry field reference
+- [GOSH-SWARM-COORDINATION.md](GOSH-SWARM-COORDINATION.md) — fact-based coordination protocol
 
 Copyright 2026 (c) Mitja Goroshevsky and GOSH Technology Ltd.
-License: MIT
+License: AGPL-3.0-only
 
 ---
 
-## 1. What Works Now
+## 1. What works now
 
-You can already run a directed swarm with targeted task delivery, courier
-wake-up, exact task resolution, context-aware routing, and execution through
-API profiles or official coding CLIs (`claude_code_cli`, `codex_cli`,
-`gemini_cli`).
+You can already run a directed swarm with targeted task delivery,
+courier wake-up, exact task resolution, context-aware routing, and
+execution through API providers (Anthropic, OpenAI, Groq, Google) or
+local coding CLIs (`claude`, `codex`, `gemini`).
 
-## 2. Canonical Fact Contract
+Identity is real: every agent has a memory principal, an agent token,
+and an X25519 keypair. Provider keys live inside memory and are
+delivered to the agent at task time inside an X25519-sealed envelope
+(X25519 + HKDF-SHA256 + AES-256-GCM) — they never sit on the agent
+host as plaintext env vars.
+
+## 2. Canonical fact contract
 
 The implemented task contract uses top-level `target` for delivery:
 
@@ -31,6 +41,7 @@ The implemented task contract uses top-level `target` for delivery:
 {
   "kind": "task",
   "fact": "Planner tea preference",
+  "scope": "swarm-shared",
   "target": ["agent:planner"],
   "metadata": {
     "task_id": "task-b227c463",
@@ -41,84 +52,106 @@ The implemented task contract uses top-level `target` for delivery:
 }
 ```
 
-- `target` is delivery intent only, not ACL
-- stable external task ID lives in `metadata.task_id`
-- persisted memory fact ID is separate and used for exact execution
+- `target` is delivery intent only, not ACL. Visibility is controlled
+  by `scope` and the read ACL.
+- The stable external task id lives in `metadata.task_id`.
+- The persisted memory fact id is separate and used for exact
+  execution lookup.
 
-Canonical execution artifacts: `kind = "task_result"` and `kind = "task_session"`,
-both linking back via `metadata.task_fact_id` and `metadata.task_id`.
+Canonical execution artifacts written by the agent: `kind = "task_result"`,
+`kind = "task_session"`, and (when applicable) `kind = "task_deliverable"`.
+All link back via `metadata.task_fact_id` and `metadata.task_id`.
 
-## 3. Two Profile Systems
+## 3. Two profile systems
 
 Memory-side and agent-side profiles are related but separate.
 
-**Memory-side profiles** (per memory key) produce `recommended_profile`,
-`payload`, and `payload_meta` from `memory recall`. If not configured,
-`complexity_hint` is still returned but `payload` and `payload_meta` are absent.
+**Memory-side profiles** (per memory namespace) produce
+`recommended_profile`, `payload`, and `payload_meta` from
+`memory_recall` and `memory_plan_inference`. Each profile names a
+model, a `secret_ref`, and `pricing`. Memory selects the profile by
+mapping the complexity hint level (1–5) to a profile name.
 
-**Agent-side profiles** (per watcher process) map `fast / balanced / strong /
-review / extraction` to actual execution backends (API or CLI).
+**Agent-side execution** consumes whatever memory returned: model id,
+secret reference, pricing. The agent itself does not carry a profile
+catalog. Memory is authoritative.
 
-An agent may use both signals together, but they are not the same layer.
+For local-CLI execution, the profile's `payload_meta.local_cli` block
+points at one of `claude`, `codex`, or `gemini`, and the agent invokes
+that binary instead of an API call.
 
-## 4. CLI Executor Safety Model
+## 4. CLI executor concurrency
 
-- Exactly one CLI execution may run at a time per agent process
-- Cooldown is global across all CLI providers (minimum `600s`)
-- A Claude Code task blocks Codex and Gemini in the same agent process (and vice versa)
+- A single agent process tracks `in_flight_tasks` and caps itself at
+  `max_parallel_tasks` (default 4).
+- Watch dispatch deduplicates on `task_fact_id` — both courier delivery
+  and poll fallback check `task_result` lookups before claiming.
+- There is no global 600-second cooldown across coding CLIs in the
+  current implementation. The single-flight constraint on the data
+  plane is enforced at memory-write time.
 
-This is intentional -- keeps consumer-login usage conservative.
+## 5. Bringing up a watcher agent
 
-## 5. Starting a Watcher Agent
+Prerequisites:
 
-Prerequisites: log into `claude`, `codex`, and `gemini` once manually on the
-machine. See [SETUP.md](./SETUP.md) for building binaries and starting memory.
+- Memory running and bootstrapped (see [SETUP.md](SETUP.md) §1).
+- A swarm created and the agent's principal granted membership.
+- Provider keys stored as memory secrets (not as env vars on the agent
+  host).
 
-### Mixed routing example
+### 5.1 Create the agent
 
 ```bash
-cd /path/to/gosh.agent
-ANTHROPIC_API_KEY=sk-ant-... ./target/debug/gosh-agent \
-  --host 127.0.0.1 \
-  --port 8877 \
-  --memory-url http://127.0.0.1:8875/mcp \
-  --memory-token YOUR_TOKEN \
-  --watch \
-  --watch-key planner-e2e \
-  --watch-agent-id planner \
-  --watch-swarm-id swarm-alpha \
-  --watch-budget 25 \
-  --poll-interval 5 \
-  --extraction-profile anthropic_haiku_api \
-  --fast-profile claude_code_cli \
-  --balanced-profile codex_cli \
-  --strong-profile gemini_cli \
-  --review-profile anthropic_sonnet_api
+gosh agent create planner --memory local --swarm swarm-alpha
 ```
 
-> **Note:** `ANTHROPIC_API_KEY` is required for the agent's Anthropic API profiles
-> (extraction, review, and any `anthropic_*` execution profiles).
+This:
 
-### Single-provider smoke runs
+1. Calls `principal_create` for `agent:planner`.
+2. Issues an agent-kind token.
+3. Generates an X25519 keypair, registers the public key with memory.
+4. Grants membership in `swarm-alpha`.
+5. Builds a join token, saves principal/join/secret keys to the OS
+   keychain, writes `~/.gosh/agent/instances/planner.toml`.
+
+### 5.2 Optionally hook coding CLIs
 
 ```bash
-# Codex-only:
-./target/debug/gosh-agent ... --fast-profile codex_cli --balanced-profile codex_cli --strong-profile codex_cli
-
-# Gemini-only:
-./target/debug/gosh-agent ... --fast-profile gemini_cli --balanced-profile gemini_cli --strong-profile gemini_cli
-
-# Claude-only:
-./target/debug/gosh-agent ... --fast-profile claude_code_cli --balanced-profile claude_code_cli --strong-profile claude_code_cli
+gosh agent setup --instance planner
 ```
 
-## 6. Creating and Dispatching Tasks
+By default writes hooks and MCP at **project scope** under `<cwd>/`.
+Pass `--scope user` only if you really want all-host capture.
+Restrict with `--platform claude` (repeatable). Override the auto-
+detected memory key with `--key <KEY>`. Enable swarm capture with
+`--swarm <SWARM>`.
+
+### 5.3 Start in watch mode
 
 ```bash
-./target/debug/gosh --state-dir /tmp/gosh-swarm/state agent planner task create \
-  --extract memory \
+gosh agent start --instance planner \
+  --watch --watch-key planner-e2e --watch-swarm-id swarm-alpha \
+  --watch-budget 25 --poll-interval 5
+```
+
+Watch flags can also be supplied via CLI args at start time:
+
+| Flag | Purpose |
+|------|---------|
+| `--watch-key` | Namespace to watch for tasks |
+| `--watch-context-key` | Separate retrieval namespace if different from work key |
+| `--watch-agent-id` | Override agent id (rare; defaults to principal) |
+| `--watch-swarm-id` (alias `--watch-swarm`) | Swarm subscription |
+| `--watch-budget` | SHELL budget per task (default 10.0) |
+| `--poll-interval` | Seconds between fallback polls (default 30) |
+
+## 6. Creating and dispatching tasks
+
+```bash
+gosh agent task create --instance planner \
   --key planner-e2e \
   --swarm-id swarm-alpha \
+  --scope swarm-shared \
   --workflow-id wf_gate_global \
   --route fast_path \
   --priority 1 \
@@ -126,52 +159,118 @@ ANTHROPIC_API_KEY=sk-ant-... ./target/debug/gosh-agent \
 ```
 
 This writes an authoritative `kind=task` fact with top-level
-`target=["agent:planner"]` and flat metadata (`task_id`, `workflow_id`,
-`route`, `priority`). stdout prints the external `task_id`.
+`target=["agent:planner"]` and flat metadata. stdout prints the
+external `task_id`.
 
-## 7. Execution Flow
+Other useful flags on `task create`:
 
-1. Courier SSE delivers a targeted `task`
-2. Agent exact-fetches the authoritative task fact
-3. Agent asks memory for context and routing signal
-4. Routing selects `fast`, `balanced`, or `strong`
-5. Unified profile layer selects API or official CLI backend
-6. Agent writes canonical `task_result` and `task_session`
+- `--context-key` — distinct retrieval namespace
+- `--task-id` — pre-assign an external id
+- `--metadata` — JSON object merged into task metadata
+- `--target` — repeatable, overrides the inferred `agent:<instance>`
 
-## 8. Checking Status
+## 7. Execution flow
+
+1. Courier SSE delivers a targeted `task` to the watcher.
+2. Agent exact-fetches the authoritative task fact (poll fallback if
+   courier dropped).
+3. Agent calls `memory_recall` for context.
+4. Agent calls `memory_plan_inference` for the executable plan
+   (model id, `secret_ref`, pricing, optional `local_cli`).
+5. Agent decrypts the sealed secret with its X25519 private key.
+6. Bootstrap → execution → review phases run.
+7. Agent persists `task_session` (canonical trace), `task_result`
+   (final answer), and optionally `task_deliverable` (terminal
+   document/code).
+
+## 8. Checking status
 
 ```bash
-./target/debug/gosh --state-dir /tmp/gosh-swarm/state agent planner task status task-12345678 \
-  --key planner-e2e --swarm-id swarm-alpha
+gosh agent task status --instance planner task-12345678 \
+  --key planner-e2e --swarm-id swarm-alpha --json
 
-./target/debug/gosh --state-dir /tmp/gosh-swarm/state agent planner task list \
+gosh agent task list --instance planner \
   --key planner-e2e --swarm-id swarm-alpha
 ```
 
-## 9. Seeding Memory with Swarm Metadata
+The `--json` payload follows the schema in
+[TELEMETRY-CONTRACT.md](TELEMETRY-CONTRACT.md).
+
+## 9. Seeding memory with swarm metadata
 
 ```bash
-./target/debug/gosh --state-dir /tmp/gosh-swarm/state memory store \
-  "The planner prefers tea during routine checks." \
-  --key planner-e2e \
-  --agent-id planner \
-  --swarm-id swarm-alpha \
+gosh memory data store \
+  --key planner-e2e --swarm swarm-alpha \
   --scope swarm-shared \
   --target agent:planner \
   --meta workflow_id=wf_simple \
   --meta route=preference \
-  --meta priority=1
+  --meta priority=1 \
+  "The planner prefers tea during routine checks."
 ```
 
-`--meta` is flat only. Values are parsed as JSON scalars (`1` -> number,
-`true` -> boolean, `null` -> null). Arrays and objects are not supported.
+`--meta` is flat. Values are parsed as JSON scalars (`1` → number,
+`true` → boolean, `null` → null). Arrays and objects are not supported
+on the CLI surface; for nested metadata, use the MCP API directly via a
+proxy or import path.
 
-## 10. Current Caveats
+If your CLI does not yet have a provisioned agent token, run
+`gosh memory auth provision-cli` first.
 
-- **Transient poll warnings** may appear in watcher logs; they do not block
-  courier delivery or task completion.
-- **Memory context is key-wide** -- prior artifacts influence retrieval. Use
-  fresh keys for stable routing experiments.
-- **`memory_set_profiles` lacks a CLI command** -- memory-side profile
-  bootstrap is still done through Python. This is a usability limitation, not
-  a conceptual requirement.
+## 10. Local-CLI execution
+
+If the resolved profile carries a `payload_meta.local_cli` block, the
+agent does not call a remote API. Instead it invokes the named coding
+CLI (`claude`, `codex`, `gemini`) with a workspace directory the task
+metadata defines.
+
+When the local CLI completes, the agent validates the terminal
+deliverable. If the task metadata declared
+`deliverable_kind=document|code`, a `task_deliverable` fact is written
+with `metadata.artifact_role="terminal"`,
+`metadata.source="external_cli"`, and the deliverable content as the
+fact body. Failed or invalid deliverables retry up to
+`max_retries` (default 2) before the task transitions to `failed`.
+
+## 11. Multi-agent example
+
+Three agents on the same memory, three roles:
+
+```bash
+# coder (writes code in response to tasks)
+gosh agent create coder-a --memory local --swarm feature-x
+gosh agent setup --instance coder-a --platform claude
+gosh agent start --instance coder-a --watch --watch-key feature-x \
+  --watch-swarm-id feature-x
+
+# coder (parallel)
+gosh agent create coder-b --memory local --swarm feature-x --port 8768
+gosh agent setup --instance coder-b --platform claude
+gosh agent start --instance coder-b --watch --watch-key feature-x \
+  --watch-swarm-id feature-x
+
+# reviewer (review-only role)
+gosh agent create reviewer --memory local --swarm feature-x --port 8769
+gosh agent setup --instance reviewer --platform claude
+gosh agent start --instance reviewer --watch --watch-key feature-x \
+  --watch-swarm-id feature-x
+```
+
+Coordination between them is fact-based and follows the protocol in
+[GOSH-SWARM-COORDINATION.md](GOSH-SWARM-COORDINATION.md).
+
+## 12. Current caveats
+
+- **Per-namespace context**: prior artifacts in the namespace influence
+  retrieval. Use fresh `--key` values for stable routing experiments.
+- **Memory-side profile bootstrap from the CLI** is via
+  `gosh memory config set` (a JSON config blob). Per-profile
+  `memory_set_profiles` is also exposed as a tool but the canonical
+  config surface is `memory_set_config`.
+- **Hooks / MCP scope is project by default** since gosh.cli v0.5.0 and
+  gosh.agent v0.7.0. Re-run `gosh agent setup` from each project root
+  where you want capture; `--scope user` opts back into the old
+  global behavior.
+- **The `--instance` flag is post-subcommand only.** Use
+  `gosh memory data store ... --instance prod`, not
+  `gosh memory --instance prod data store ...`.
